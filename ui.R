@@ -16,11 +16,13 @@ library(ggplot2)
 library(dplyr)
 
 
-
-
 #Read in the Scores Data Set
-scoresData <- read_csv("https://raw.githubusercontent.com/dkurkji/Project2/master/spreadspoke_scores.csv",
-                       col_types = cols(over_under_line=col_double(),weather_humidity = col_number()))
+scoresData <- read_csv("spreadspoke_scores.csv",
+                       col_types = cols(
+                         over_under_line = col_double(),
+                         weather_humidity = col_number()
+                         )
+                       )
 
 #Switch to a Date format
 newScoresData <- scoresData %>% mutate(schedule_date = as.Date(schedule_date,"%m/%d/%Y"))
