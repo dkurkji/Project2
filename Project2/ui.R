@@ -17,7 +17,7 @@ library(dplyr)
 
 
 #Read in the Scores Data Set
-scoresData <- read_csv("C:/Users/dkurk/OneDrive/Documents/ST590 (R)/spreadspoke_scores.csv",
+scoresData <- read_csv("https://raw.githubusercontent.com/dkurkji/Project2/master/spreadspoke_scores.csv",
                        col_types = cols(over_under_line=col_double(),weather_humidity = col_number()))
 
 #Switch to a Date format
@@ -291,7 +291,9 @@ dashboardPage(
                                   
                                   fluidRow(
                                     
+                                    
                                     tableOutput("table2")
+                                  
                                   )
                            )
                            
