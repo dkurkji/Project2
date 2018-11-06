@@ -8,6 +8,36 @@
 #
 
 library(shiny)
+library(shinydashboard)
+library(shinythemes)
+library(tidyverse)
+library(dashboardthemes)
+library(ggplot2)
+library(dplyr)
+
+#Read in the Scores Data Set
+scoresData <- read_csv("spreadspoke_scores.csv",
+                       col_types = cols(
+                         over_under_line = col_double(),
+                         weather_humidity = col_number()
+                       )
+)
+
+#Switch to a Date format
+newScoresData <- scoresData %>% mutate(schedule_date = as.Date(schedule_date,"%m/%d/%Y"))
+
+#Filter the data and create a new over_under variable
+newScoresData <- filter(newScoresData,schedule_date >= "2000-09-03" & schedule_date <= "2018-09-17") %>% 
+  arrange(desc(schedule_date)) %>% mutate(team_home = replace(team_home,team_home == "San Diego Chargers",
+                                                              "Los Angeles Chargers")) %>% 
+  mutate(team_away = replace(team_away,team_away == "San Diego Chargers","Los Angeles Chargers")) %>%
+  mutate(team_home = replace(team_home,team_home == "St. Louis Rams","Los Angeles Rams")) %>% 
+  mutate(team_away = replace(team_away,team_away == "St. Louis Rams","Los Angeles Rams")) %>% 
+  mutate(over_under = case_when(over_under_line < score_home + score_away ~ "Over",
+                                over_under_line > score_home + score_away ~ "Under",
+                                TRUE ~ "Push"))
+
+
 
 # Define server logic required to draw a histogram
 shinyServer(function(input, output,session) {
