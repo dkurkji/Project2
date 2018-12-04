@@ -14,6 +14,9 @@ library(tidyverse)
 library(dashboardthemes)
 library(ggplot2)
 library(dplyr)
+library(class)
+library(dataPreparation)
+library(plotrix)
 
 
 #Read in the Scores Data Set
@@ -28,7 +31,7 @@ scoresData <- read_csv("spreadspoke_scores.csv",
 newScoresData <- scoresData %>% mutate(schedule_date = as.Date(schedule_date,"%m/%d/%Y"))
 
 #Filter the data and create a new over_under variable
-newScoresData <- filter(newScoresData,schedule_date >= "2000-09-03" & schedule_date <= "2018-09-17") %>% 
+newScoresData <- filter(newScoresData,schedule_date >= "2000-09-03" & schedule_date <= "2018-09-01") %>% 
                  arrange(desc(schedule_date)) %>% mutate(team_home = replace(team_home,team_home == "San Diego Chargers",
                                                                              "Los Angeles Chargers")) %>% 
   mutate(team_away = replace(team_away,team_away == "San Diego Chargers","Los Angeles Chargers")) %>%
@@ -39,6 +42,48 @@ newScoresData <- filter(newScoresData,schedule_date >= "2000-09-03" & schedule_d
                                                TRUE ~ "Push"))
 
 
+#Create a filtered data set for the logistic regression model
+glmScoresData <- filter(newScoresData,(over_under != "Push") & (schedule_playoff == "FALSE"))
+
+glmScoresData <- select(glmScoresData,spread_favorite:weather_wind_mph,over_under) %>% 
+  mutate(weather_detail = replace_na(weather_detail,"Neutral")) %>%
+  mutate(weather_detail = replace(weather_detail,weather_detail == "Fog" | weather_detail == "Rain"
+                                  | weather_detail == "Rain | Fog" | weather_detail == "Snow" | 
+                                    weather_detail == "Snow | Fog" 
+                                  | weather_detail == "Snow | Freezing Rain","Precipitation")) %>% 
+  mutate(num_over_under = case_when(over_under == "Over" ~ 1, TRUE ~ 0))
+
+#Use the absolute values of the spreads
+glmScoresData$spread_favorite <- abs(glmScoresData$spread_favorite)
+
+
+#Subset Data for kNN
+knnData <- select(glmScoresData, spread_favorite:over_under, - weather_detail)
+
+#Set Over/Under as factor
+knnData$over_under <- as.factor(knnData$over_under)
+
+knnData$weather_temperature <- as.numeric(knnData$weather_temperature)
+knnData$weather_wind_mph <- as.numeric(knnData$weather_wind_mph)
+
+#get training and test sets 
+set.seed(538) 
+
+train <- sample(1:nrow(knnData), size = nrow(knnData)*0.6) 
+test <- dplyr::setdiff(1:nrow(knnData), train)
+
+knnDataTrain <- select(knnData[train, ], spread_favorite:weather_wind_mph) 
+knnDataTest <- select(knnData[test, ], spread_favorite:weather_wind_mph)
+
+#Standardize training and tests sets
+means <- colMeans(knnDataTrain) 
+sds <- matrixStats::colSds(as.matrix(knnDataTrain))
+
+knnDataTrainStd <- apply(knnDataTrain, MARGIN = 2, function(x){(x-mean(x))/sd(x)}) 
+
+knnDataTestStd <- as.data.frame(lapply(1:ncol(knnDataTest), 
+                                       FUN = function(w, x, y, z){(x[,w]-y[w])/z[w]}, 
+                                       x = knnDataTest, y = means, z = sds))
 
 # Define UI for application
 dashboardPage(
@@ -55,6 +100,9 @@ dashboardPage(
                    menuItem("About", tabName = "about", icon = icon("archive")),
                    menuItem("Over/Under Chart", tabName = "chart", icon = icon("bar-chart")),
                    menuItem("Cover Margin Plot", tabName = "plot", icon = icon("line-chart")),
+                   menuItem("Over/Under Prediction", tabName = "glm", icon = icon("line-chart")),
+                   menuItem("KNN Predictors",tabName = "knn", icon = icon("area-chart")),
+                   menuItem("Clustering",tabName = "clust",icon = icon("pie-chart")),
                    menuItem("Data",tabName = "data",icon = icon("table"))
                    
                  )), #Closes dashboard sidebar
@@ -306,6 +354,167 @@ dashboardPage(
                          
                  ), #End of 2nd plot page
                  
+                 #Start of glm page
+                 tabItem(tabName = "glm",
+                         
+                         fluidRow(
+                           
+                           #Header
+                           h2("Predict Over/Under Probabilities"),
+                           br(),
+                           #Info about page
+                           h4("This page plots a GLM fit using logistic regression. Choose either one or two
+                              predictors and view the corresponding plot and summary on the left hand side.
+                              You can also select individual values which will give an over/under probability
+                              underneath the plot."),
+                           br()
+                         ),
+                         
+                         #Variable selection
+                         fluidRow(
+                           
+                           column(4,
+                                  
+                                  box(width = 6,
+                           selectizeInput("varSelect1","Select 1st Predictor",
+                                          names(glmScoresData[1:5]),selected = "spread_favorite"),
+                           
+                           selectizeInput("varSelect2","Select 2nd Predictor",
+                                          choices = c(" ", names(glmScoresData[1:5])),
+                                                    selected = NULL  )
+                           
+                                  )
+                           ),
+                           column(8,
+                                  
+                                  box(width = 12,
+                                  #Prediction selection based on variable input
+                                  conditionalPanel(condition = "input.varSelect1 == 'spread_favorite' ||
+                                                   input.varSelect2 == 'spread_favorite'",
+                                                   sliderInput("spread","Select Spread",
+                                                               min=0,max=25,value=4.5,step=.5)),
+                                  
+                                  conditionalPanel(condition = "input.varSelect1 == 'over_under_line' ||
+                                                   input.varSelect2 == 'over_under_line'",
+                                                   sliderInput("total","Select Total",
+                                                               min=30,max=63,value=45,step=.5)),
+                                  
+                                  conditionalPanel(condition = "input.varSelect1 == 'weather_detail' ||
+                                                   input.varSelect2 == 'weather_detail'",
+                                                   selectInput("weather","Select Weather Detail",
+                                                               choices = levels(as.factor(glmScoresData$weather_detail)),
+                                                               selected = "Neutral")),
+                                  
+                                  conditionalPanel(condition = "input.varSelect1 == 'weather_temperature' ||
+                                                   input.varSelect2 == 'weather_temperature'",
+                                                   sliderInput("temp","Select Temperature",
+                                                               min=0,max=95,value=65,step=1)),
+                                  
+                                  conditionalPanel(condition = "input.varSelect1 == 'weather_wind_mph' ||
+                                                   input.varSelect2 == 'weather_wind_mph'",
+                                                   sliderInput("wind","Select Wind Speed",
+                                                               min=0,max=25,value=6,step=1))
+                                  
+                                  
+                                  )
+                                  )
+                         
+                         
+                         
+                         ),
+                         
+                         fluidRow(
+                           
+                                  box(verbatimTextOutput("glmModel"),width = 6),
+                                  
+                                  box(plotOutput("glmPlot"),width = 6),
+                         
+                         br(),
+                         textOutput("prediction")
+                 )
+                 ),
+                 
+                 #Start of KNN tab
+                 tabItem(tabName = "knn",
+                         
+                         fluidRow(
+                           
+                           #Header
+                           h2("K-Nearest Neighbors"),
+                           br(),
+                           h4("This page predicts the class variable Over/Under by using the k nearest 
+                              neighbors of the given predictors. Select two predictors and the desired value 
+                              for k. If checkbox is selected you can click on a point to view the corresponding 
+                              neighborhood. Underneath the plot shows the corresponding missclassification rate."),
+                           br()
+                           
+                         ),
+                           
+                           column(3,
+                                  
+                                  selectizeInput("knnVar1","Select 1st Predictor",
+                                                 names(select(glmScoresData,spread_favorite,over_under_line,
+                                                              weather_temperature,weather_wind_mph)),
+                                                       selected = "spread_favorite"),
+                                  
+                                  selectizeInput("knnVar2","Select 2nd Predictor",
+                                                 names(select(glmScoresData,spread_favorite,over_under_line,
+                                                              weather_temperature,weather_wind_mph)),
+                                                       selected = "over_under_line"),
+                                  
+                                  sliderInput("knn", "Select the Number of K Nearest Neighbors",
+                                              value = 50, min = 1,max = 500),
+                                  
+                                  checkboxInput("knnPoint","Show the Neighborhood for One Point (click to select a point)")
+                                  ),
+                           
+                           column(9,
+                             
+                            plotOutput("knnPlot",width = "600px", height = "600px",click = "click_plot"),
+                           br(),
+                           textOutput("missInfo")
+                           )
+                         
+                         ),
+                 
+                 tabItem(tabName = "clust",
+                         
+                         fluidRow(
+                           
+                           #Header
+                           h2("Hierarchical Clustering"),
+                           br(),
+                           h4("This page uses hierarchical clustering to divide the selected variables. Choose 
+                              your desired variables and the number of clusters used for group membership. There 
+                              is also an option for the method on how the observations are joined together."),
+                           br()
+                           
+                         ),
+                         
+                         column(3,
+                                
+                                selectizeInput("clustVar1","Select 1st Variable",
+                                               names(select(glmScoresData,spread_favorite,over_under_line,
+                                                            weather_temperature,weather_wind_mph)),
+                                               selected = "spread_favorite"),
+                                
+                                selectizeInput("clustVar2","Select 2nd Variable",
+                                               names(select(glmScoresData,spread_favorite,over_under_line,
+                                                            weather_temperature,weather_wind_mph)),
+                                               selected = "over_under_line"),
+                                
+                                selectizeInput("clustMethod","Select Method for Linkage",
+                                               choices = c("Complete","Average")),
+                                
+                                sliderInput("clusters", "Select the Number Clusters",
+                                            value = 8, min = 1,max = 15)
+                         ),
+                         
+                         column(9,
+                                
+                                plotOutput("clustPlot")
+                         )
+                 ),
                  #Last page of app
                  tabItem(tabName = "data",
                          

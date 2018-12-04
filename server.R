@@ -13,6 +13,9 @@ library(tidyverse)
 library(dashboardthemes)
 library(ggplot2)
 library(dplyr)
+library(class)
+library(dataPreparation)
+library(plotrix)
 
 #Read in the Scores Data Set
 scoresData <- read_csv("spreadspoke_scores.csv",
@@ -26,7 +29,7 @@ scoresData <- read_csv("spreadspoke_scores.csv",
 newScoresData <- scoresData %>% mutate(schedule_date = as.Date(schedule_date,"%m/%d/%Y"))
 
 #Filter the data and create a new over_under variable
-newScoresData <- filter(newScoresData,schedule_date >= "2000-09-03" & schedule_date <= "2018-09-17") %>% 
+newScoresData <- filter(newScoresData,schedule_date >= "2000-09-03" & schedule_date <= "2018-09-01") %>% 
   arrange(desc(schedule_date)) %>% mutate(team_home = replace(team_home,team_home == "San Diego Chargers",
                                                               "Los Angeles Chargers")) %>% 
   mutate(team_away = replace(team_away,team_away == "San Diego Chargers","Los Angeles Chargers")) %>%
@@ -37,7 +40,48 @@ newScoresData <- filter(newScoresData,schedule_date >= "2000-09-03" & schedule_d
                                 TRUE ~ "Push"))
 
 
-# Define server logic required to draw a histogram
+#Create a filtered data set for the logistic regression model
+glmScoresData <- filter(newScoresData,(over_under != "Push") & (schedule_playoff == "FALSE"))
+
+glmScoresData <- select(glmScoresData,spread_favorite:weather_wind_mph,over_under) %>% 
+  mutate(weather_detail = replace_na(weather_detail,"Neutral")) %>%
+  mutate(weather_detail = replace(weather_detail,weather_detail == "Fog" | weather_detail == "Rain"
+                                  | weather_detail == "Rain | Fog" | weather_detail == "Snow" | 
+                                    weather_detail == "Snow | Fog" 
+                                  | weather_detail == "Snow | Freezing Rain","Precipitation")) %>% 
+  mutate(num_over_under = case_when(over_under == "Over" ~ 1, TRUE ~ 0))
+
+#Use the absolute values of the spreads
+glmScoresData$spread_favorite <- abs(glmScoresData$spread_favorite)
+
+
+#Subset Data for kNN
+knnData <- select(glmScoresData, spread_favorite:over_under, - weather_detail)
+  
+  #Set Over/Under as factor
+  knnData$over_under <- as.factor(knnData$over_under)
+  
+  knnData$weather_temperature <- as.numeric(knnData$weather_temperature)
+  knnData$weather_wind_mph <- as.numeric(knnData$weather_wind_mph)
+  
+  #get training and test sets 
+  set.seed(538) 
+  
+  train <- sample(1:nrow(knnData), size = nrow(knnData)*0.6) 
+  test <- dplyr::setdiff(1:nrow(knnData), train)
+  
+  knnDataTrain <-knnData[train, ]
+  knnDataTest <- knnData[test, ]
+  
+  #Standardize training and tests sets
+  scales <- build_scales(knnDataTrain,cols = c("spread_favorite","over_under_line","weather_temperature",
+                                               "weather_wind_mph"),verbose = FALSE)
+  
+  knnDataTrainStd <- fastScale(knnDataTrain,scales = scales,verbose = FALSE)
+  
+  knnDataTestStd <- fastScale(knnDataTest,scales = scales,verbose = FALSE)
+
+# Define server logic
 shinyServer(function(input, output,session) {
   
   
@@ -392,5 +436,249 @@ shinyServer(function(input, output,session) {
     newScoresData
   })
     
-    })
+  
+#_______________________________________________________________________________________________________
 
+#Grab data used for modeling purposes  
+getGlmData <- reactive({
+  
+  glmData <- glmScoresData
+  
+})
+
+#Fit the model based on variable inputs
+glmFit <- reactive({
+  
+  glmData<-getGlmData()
+  
+  if (input$varSelect2 == " " | input$varSelect2 == input$varSelect1){
+  
+    glmFit <- glm(paste0("num_over_under~",input$varSelect1),data = glmData,family = "binomial")
+  }
+  
+  else{ 
+   
+  glmFit <-glm(paste0("num_over_under~", input$varSelect1,"*",input$varSelect2),
+               data = glmData,family = "binomial")
+  }
+  
+})
+
+#Ouput summary of fitted model
+output$glmModel<-renderPrint({
+  
+  glmFit <- glmFit()
+  
+  summary(glmFit)
+  
+})
+
+#Output plot of fitted model
+output$glmPlot <- renderPlot({
+  
+  glmFit <- glmFit()
+  
+  ggiraphExtra::ggPredict(glmFit)
+  
+})
+
+#Run prediction based on inputted values
+glmPredict <- reactive({
+  
+  glmData <- getGlmData()
+  
+  glmFit <- glmFit()
+    
+    glmPredict <- predict(glmFit,newdata = data.frame(spread_favorite = input$spread,
+                                                      over_under_line = input$total,
+                                                      weather_detail = input$weather,
+                                                      weather_temperature = input$temp,
+                                                      weather_wind_mph = input$wind),type = "response")
+})
+
+#Output prediction
+output$prediction <- renderText({
+  
+paste("The Estimated Over/Under Probability with the chosen values is ", round(glmPredict(),4))
+
+})
+
+#___________________________________________________________________________________________________________
+
+#Create Subset of Training set
+knnDataTrainSub <- as.matrix(sapply(knnDataTrainStd, as.numeric))
+  
+knnTrainSub <- reactive(knnDataTrainSub[,c(input$knnVar1,input$knnVar2)])
+
+knnY <- knnDataTrainSub[,5]
+
+#Obtain sequence of first predictor 
+getPX1 <- reactive({
+  
+  if(input$knnVar1 == "spread_favorite"){
+    
+    px1 <- seq(-1.6,5.6,.1)
+  }
+  
+  else if(input$knnVar1 == "over_under_line"){
+    
+    px1 <- seq(-2.7,4.2,.1)
+  }
+  
+  else if(input$knnVar1 == "weather_temperature"){
+    
+    px1 <- seq(-3.8,2.2,.1)
+  }
+  
+  else{
+    
+    px1 <- seq(-1.2,4.8,.1)
+  }
+  
+})
+
+#Obtain sequence of 2nd predictor
+getPX2 <- reactive({
+  
+  if(input$knnVar2 == "spread_favorite"){
+    
+    px2 <- seq(-1.6,5.6,.05)
+  }
+  
+  else if(input$knnVar2 == "over_under_line"){
+    
+    px2 <- seq(-2.7,4.2,.05)
+  }
+  
+  else if(input$knnVar2 == "weather_temperature"){
+    
+    px2 <- seq(-3.8,2.2,.05)
+  }
+  
+  else{
+    
+    px2 <- seq(-1.2,4.8,.05)
+  }
+})
+
+#Expand grid on predictors 
+knnTestSub <- reactive(expand.grid(getPX1(),getPX2()))
+
+idx  <- NULL
+
+dmat <- NULL
+
+## ID the point clicked on 
+
+xy  <- reactive(c(input$click_plot$x, input$click_plot$y))
+
+id <- observe({
+  
+  if (!is.null(xy())) {
+    
+    dmat <- as.matrix(dist(rbind(xy(), knnTrainSub())))
+    
+    idx <<- which.min(dmat[1, -1])
+    
+    dmat <<- dmat[-1, -1]
+    
+  }
+})
+
+#Output knn plot
+output$knnPlot <- renderPlot({
+  
+  xy()
+  
+  validate(
+    need(input$knnVar1 != input$knnVar2,"Please select distinct predictors")
+  )
+  
+  #Fit kNN Model
+  knnFit <- knn(train = knnTrainSub(),test = knnTestSub(),cl = knnY, k = input$knn)
+  
+  probs <- matrix(knnFit, length(getPX1()), length(getPX2()))
+  
+  ## Plot create empty plot
+  plot(knnTrainSub(), asp = 1, type = "n", xlab = input$knnVar1, ylab = input$knnVar2, 
+       xlim = range(getPX1()), ylim = range(getPX2()), 
+       main =  paste0(input$knn,"-Nearest Neighbors"))
+  
+
+  ## Get neighbourhood, draw circle, if needed
+  if (input$knnPoint & !is.null(idx)) {
+    
+   rad <- sort(dmat[, idx])[1 + input$knn]
+    
+  draw.circle(x = knnTrainSub()[idx, 1], y = knnTrainSub()[idx, 2], radius= rad, col = "lightgoldenrod1")
+    
+ }
+  
+  ## Plot the grid
+ grid <- expand.grid(x = getPX1(), y = getPX2())
+  
+ points(grid, pch = 20, cex = 0.2, col = ifelse(probs > 1.5, "coral", "cornflowerblue"))
+  
+ points(knnTrainSub(), col = ifelse(knnY == 2, "coral", "cornflowerblue"), 
+       cex = 1.5, pch = 21, lwd = 2)
+  
+  
+  ## Add decision boundary
+  contour(getPX1(),getPX2(), probs, levels = 1.5, labels = "", lwd = 1.5, add = TRUE)
+  
+
+  ## ID points within neighborhood
+  if (input$knnPoint & !is.null(idx)) {
+    
+    points(knnTrainSub()[which(dmat[, idx] <= rad), ], col = "red", pch = 20, cex = 0.75)
+    
+    points(knnTrainSub()[idx, , drop = FALSE], pch = 3, cex = 1.5, lwd = 2)
+    
+ }
+  
+})
+
+#Output missclassification rate  
+output$missInfo <- renderText({
+  
+  validate(
+    need(input$knnVar1 != input$knnVar2,"Please select distinct predictors")
+  )
+  
+  pred <- ifelse(knn(knnTrainSub(),knnTrainSub(),cl = knnY,k = input$knn)=="1", 1, 2)
+
+  missRate <- 1 - sum(pred==knnY)/length(knnY)
+  
+  paste0("The Missclassification Rate for ",input$knnVar1," and ",input$knnVar2," when k = ",input$knn," is ",
+         round(missRate,4))
+})
+#_____________________________________________________________________________________________________________
+
+#Create Hierarchical Clustering based on inputted linkage
+
+getClustPlot <- reactive({
+  
+glmData <- getGlmData()
+
+validate(
+  need(input$clustVar1 != input$clustVar2,"Please select distinct variables")
+)
+  
+hierClust <- hclust(dist(select(glmData, spread_favorite,over_under_line,weather_temperature,
+                                           weather_wind_mph)), method = tolower(input$clustMethod))
+  
+memberships <- as.factor(cutree(hierClust, k = input$clusters))
+
+ggplot(cbind(glmData, memberships), aes_string(x = input$clustVar1, y = input$clustVar2, color = memberships)) + 
+  geom_point() + 
+  labs(col = "Cluster Membership")
+
+})
+
+#Output cluster plot
+output$clustPlot <- renderPlot({
+
+getClustPlot()
+
+})
+})
